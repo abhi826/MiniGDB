@@ -1,10 +1,10 @@
 cmake_minimum_required (VERSION 3.0)
-project (MiniDbg)
+project (MiniGbd)
 
 add_compile_options(-std=c++14)
 
 include_directories(ext/libelfin ext/linenoise include)
-add_executable(minidbg src/minidbg.cpp ext/linenoise/linenoise.c)
+add_executable(minigbd src/minigbd.cpp ext/linenoise/linenoise.c)
 
 add_executable(hello examples/hello.cpp)
 set_target_properties(hello
@@ -24,7 +24,7 @@ add_custom_target(
    COMMAND make
    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/ext/libelfin
 )
-target_link_libraries(minidbg
+target_link_libraries(minigbd
                       ${PROJECT_SOURCE_DIR}/ext/libelfin/dwarf/libdwarf++.so
                       ${PROJECT_SOURCE_DIR}/ext/libelfin/elf/libelf++.so)
-add_dependencies(minidbg libelfin)
+add_dependencies(minigbd libelfin)

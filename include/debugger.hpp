@@ -5,20 +5,21 @@
 #include <string>
 #include <linux/types.h>
 
-namespace minidbg {
+namespace minigdb {
     class debugger {
     public:
-        debugger (std::string prog_name, pid_t pid)
-            : m_prog_name{std::move(prog_name)}, m_pid{pid} {}
+        debugger (std::string progName, pid_t pid)
+            : debugeeProgramName{std::move(progName)}, debugeePid{pid} {}
 
         void run();
 
     private:
-        void handle_command(const std::string& line);
-        void continue_execution();        
+        void handleCommand(const std::string& line);
+        void continueExecution();
+        void waitForDebugeeToStop();        
         
-        std::string m_prog_name;
-        pid_t m_pid;
+        std::string debugeeProgramName;
+        pid_t debugeePid;
     };
 }
 

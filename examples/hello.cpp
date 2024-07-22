@@ -1,6 +1,6 @@
 #include <iostream>
 
 int main () {
-    int * arr = new int[1000];
-    std::cout << "Hello world";
+    std::cout<< "Hello World" << std::endl;
+    std::cout << "Goodbye world"<< std::endl;
 }

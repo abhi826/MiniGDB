@@ -1,7 +1,10 @@
 cmake_minimum_required (VERSION 3.0)
 project (MiniGbd)
 
-add_compile_options(-std=c++14)
+set(CMAKE_BUILD_TYPE Debug)
+
+add_compile_options(-std=c++17)
+#add_compile_options(-fno-stack-protector)
 
 include_directories(ext/libelfin ext/linenoise include)
 add_executable(minigbd src/minigbd.cpp ext/linenoise/linenoise.c)

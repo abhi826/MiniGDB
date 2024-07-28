@@ -12,6 +12,7 @@ namespace minigdb{
         public:
             breakpoint(pid_t debugeePid, uintptr_t bpAddr): debugeePid(debugeePid), bpAddr(bpAddr){}
             void setBreakpoint();
+            void unsetBreakpoint();
             void restoreBreakpoint();
         private:
             pid_t debugeePid;

@@ -18,13 +18,14 @@ namespace minigdb {
         void continueExecution();
         void waitForDebugeeToStop();      
         void addBreakpoint(uintptr_t bpAddr);  
-        bool currentlyAtBreakpoint();
+        void handleIfCurrentlyAtBreakpoint();
         unsigned long long getRegisterValue(std::string reg);
         void writeRegisterValue(std::string reg, unsigned long long val);
         void dumpRegisterValues();
         long readDataAtAddress(uintptr_t addr);
         void writeDataAtAddress(uintptr_t addr, long data);
         void fillRegisterStruct();
+        void vmmap();
 
         
         std::string debugeeProgramName;

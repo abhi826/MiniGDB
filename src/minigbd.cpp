@@ -44,6 +44,10 @@ void setRegisters(pid_t pid, struct user_regs_struct& data){
     ptrace(PTRACE_SETREGS, pid, 0, &data);
 }
 
+void singleStep(pid_t pid){
+    ptrace(PTRACE_SINGLESTEP, pid, 0, 0);
+}
+
 long debugger::readDataAtAddress(uintptr_t addr){
     return readData(debugeePid, addr);
 }
@@ -53,10 +57,13 @@ void debugger::writeDataAtAddress(uintptr_t addr, long data){
 }
 
 void breakpoint::setBreakpoint(){
-   long originalData = readData(debugeePid, bpAddr);
-   originalDataAtBPAddr = originalData;
-   long newData = originalData | 0xCC;
-   writeData(debugeePid, bpAddr, newData);
+   originalDataAtBPAddr = readData(debugeePid, bpAddr);
+   long newDataWithBPInstruction = ((originalDataAtBPAddr & ~0xFF) | 0xCC);
+   writeData(debugeePid, bpAddr, newDataWithBPInstruction);
+}
+
+void breakpoint::unsetBreakpoint(){
+    writeData(debugeePid, bpAddr, originalDataAtBPAddr);
 }
 
 void breakpoint::restoreBreakpoint(){
@@ -117,6 +124,9 @@ void debugger::handleCommand(const std::string& line) {
             writeRegisterValue(args[2], std::stoull(val, 0, 16));
         }
     }
+    else if(isPrefix(command, "vmmap")){
+        vmmap();
+    }
     else if(isPrefix(command, "quit")){
         exitDebugger(debugeePid);
     }
@@ -127,6 +137,16 @@ void debugger::handleCommand(const std::string& line) {
 
 
 void debugger::addBreakpoint(uintptr_t bpAddr){
+    // Change first byte at the breakpoint instruction into CC.
+    // Save the byte to change it back later.
+    // Continue the program until it hits the breakpoint.
+    // To continue the program after the breakpoint:
+    //      If current address is a breakpoint address
+    //      Change 'CC' byte back to what it was originally
+    //      Decrement the instruction pointer by 1 bye.
+    //      Step forward by 1 instruction
+    //      Restore the breakpoint again
+    //      continue the program                
      breakpoint* bp = new breakpoint(debugeePid, bpAddr);
      mapAddressToBreakpoint[bpAddr]=bp;
      bp->setBreakpoint();
@@ -219,11 +239,30 @@ void debugger::dumpRegisterValues(){
     }
 }
 
-bool debugger::currentlyAtBreakpoint(){
+void debugger::vmmap(){
+    std::string pidStr = std::to_string(debugeePid); 
+    std::string printMemoryMappingCmd = "cat /proc/"+pidStr+"/maps";
+    system(printMemoryMappingCmd.c_str());
+
+}
+
+void debugger::handleIfCurrentlyAtBreakpoint(){
     uintptr_t ripValue = getRegisterValue("rip");
+    // When it hits a breakpoint, the instruction pointer points
+    // 1 byte ahead.
+    ripValue-=1;
+    if(mapAddressToBreakpoint.find(ripValue)!=mapAddressToBreakpoint.end()){
+        breakpoint* bp = mapAddressToBreakpoint[ripValue];
+        bp->unsetBreakpoint();
+        writeRegisterValue("rip", ripValue);
+        singleStep(debugeePid);
+        bp->setBreakpoint();
+    }
+
 }
 
 void debugger::continueExecution() {
+    handleIfCurrentlyAtBreakpoint();
     ptrace(PTRACE_CONT, debugeePid, nullptr, nullptr);
     waitForDebugeeToStop();
 }

@@ -214,6 +214,10 @@ unsigned long long debugger::getRegisterValue(std::string reg){
             unsigned long long regValue = regValues.*ptrToRegInStruct;
             return regValue;
     }
+    else{
+            std::cerr << reg << " register not found in mapRegisterToIdx!" << std::endl;
+
+    }
 
     return -1;
 }
@@ -256,6 +260,7 @@ void debugger::handleIfCurrentlyAtBreakpoint(){
         bp->unsetBreakpoint();
         writeRegisterValue("rip", ripValue);
         singleStep(debugeePid);
+        waitForDebugeeToStop();
         bp->setBreakpoint();
     }
 

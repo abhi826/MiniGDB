@@ -17,8 +17,6 @@
 
 using namespace minigdb;
 
-std::unordered_map<uintptr_t, breakpoint*> mapAddressToBreakpoint;
-
 void exitDebugger(pid_t pid);
 
 /*
@@ -88,7 +86,7 @@ bool isPrefix(const std::string& s, const std::string& of) {
     return std::equal(s.begin(), s.end(), of.begin());
 }
 
-void debugger::handleCommand(const std::string& line) {
+bool debugger::handleCommand(const std::string& line) {
     auto args = split(line,' ');
     auto command = args[0];
 
@@ -128,11 +126,12 @@ void debugger::handleCommand(const std::string& line) {
         vmmap();
     }
     else if(isPrefix(command, "quit")){
-        exitDebugger(debugeePid);
+        return false;
     }
     else {
         std::cerr << "Unknown command\n";
     }
+    return true;
 }
 
 
@@ -146,30 +145,86 @@ void debugger::addBreakpoint(uintptr_t bpAddr){
     //      Decrement the instruction pointer by 1 bye.
     //      Step forward by 1 instruction
     //      Restore the breakpoint again
-    //      continue the program                
-     breakpoint* bp = new breakpoint(debugeePid, bpAddr);
-     mapAddressToBreakpoint[bpAddr]=bp;
-     bp->setBreakpoint();
+    //      continue the program   
+    auto bp = std::make_shared<breakpoint>(debugeePid, bpAddr);
+    mapAddressToBreakpoint[bpAddr] = bp;
+    bp->setBreakpoint();
+}
+
+siginfo_t debugger::get_signal_info(){
+    siginfo_t info;
+    memset(&info, 0, sizeof(info));
+    ptrace(PTRACE_GETSIGINFO, debugeePid, nullptr, &info);
+    return info;
 }
 
 void debugger::waitForDebugeeToStop(){
     int waitStatus;
     int options = 0;
     waitpid(debugeePid, &waitStatus, options);
-    if(WIFSTOPPED(waitStatus)){
-        std::cout<<"\nThe debugee has stopped execution."<<std::endl;
+
+    // Check if the child process exited normally
+    if (WIFEXITED(waitStatus)) {
+        std::cout << "Child exited normally with status " << WEXITSTATUS(waitStatus) << std::endl;
         return;
     }
-    else if(WIFEXITED(waitStatus)){
-        std::cout<<"\nThe debugee has finished execution."<<std::endl;
-        exit(0);
-    }
-    else
-    {
-        std::cout<<"\nUnknown status of debugee."<<std::endl;
-        exit(0);
-    }
 
+    // Check if the child process was terminated by a signal
+    if (WIFSIGNALED(waitStatus)) {
+        int sig = WTERMSIG(waitStatus);
+        std::cout << "Child terminated by signal " << strsignal(sig) << " (signal number " << sig << ")" << std::endl;
+        return;
+    }
+    // Check if the child process is stopped (e.g., for a SIGTRAP or SIGSTOP)
+    if (WIFSTOPPED(waitStatus))
+    {
+        auto siginfo = get_signal_info();
+        // using si_signo to work out which signal was sent, 
+        // and si_code to get more information about the signal.
+        // https://elixir.bootlin.com/linux/v6.8/source/arch/x86/include/uapi/asm/signal.h#L26 (to see what the value of si_signo represents)
+        // https://elixir.bootlin.com/linux/v6.8/source/include/uapi/asm-generic/siginfo.h#L175 (to see what the value of si_code represents)
+        // std::cout << "Got signal " << siginfo.si_signo << " " << strsignal(siginfo.si_signo) << std::endl;
+        // std::cout << "SIGTRAP code " << siginfo.si_code << std::endl;
+        switch (siginfo.si_signo)
+        {
+            case SIGTRAP:
+                handleSigTrap(siginfo);
+                break;
+            case SIGSEGV:
+                std::cout << "The process being traced segfaulted - Reason Code: " << siginfo.si_code << std::endl;
+                break;
+            default:
+                std::cout << "Received signal: " << strsignal(siginfo.si_signo) << std::endl;
+        }
+    }
+}
+
+void debugger::handleSigTrap(siginfo_t sigInfo){
+    // SI_KERNEL or TRAP_BRKPT will be sent when a breakpoint is hit,
+    // and TRAP_TRACE will be sent on single step completion.
+    switch(sigInfo.si_code)
+    {
+        case SI_KERNEL:
+        case TRAP_BRKPT:
+        {
+            // SI_KERNEL or TRAP_BRKPT will be sent when a breakpoint is hit.
+            // When it hits a breakpoint, the instruction pointer points
+            // 1 byte ahead, so set it back 1 byte.
+            uintptr_t ripValue = getRegisterValue("rip");
+            ripValue-=1;
+            writeRegisterValue("rip", ripValue);
+            std::cout << "Hit breakpoint at address 0x" << std::hex << getRegisterValue("rip") << std::endl;
+            break;
+        }
+        case TRAP_TRACE:
+            // TRAP_TRACE will be sent on single step completion.
+            break;
+        case SI_USER:
+            // Seems like the first call to execve by the debugee leads to this signal number.
+            break;
+        default:
+            std::cout << "Unknown SIGTRAP code: " << sigInfo.si_code << std::endl;
+    }
 }
 
 void debugger::run() {
@@ -184,13 +239,14 @@ void debugger::run() {
     */
         waitForDebugeeToStop();
         char* line = nullptr;
-        while(line = linenoise("minigbd> ")) {
+        bool shouldContinue = true;
+        while(shouldContinue && (line = linenoise("minigbd> ")) ) {
             std::string lineStr(line);
             if (lineStr.empty() || lineStr.find_first_not_of(' ') == std::string::npos) {
                 linenoiseFree(line);
                 continue;
             }
-            handleCommand(line);
+            shouldContinue = handleCommand(line);
             linenoiseHistoryAdd(line);
             linenoiseFree(line);
         }
@@ -252,18 +308,13 @@ void debugger::vmmap(){
 
 void debugger::handleIfCurrentlyAtBreakpoint(){
     uintptr_t ripValue = getRegisterValue("rip");
-    // When it hits a breakpoint, the instruction pointer points
-    // 1 byte ahead.
-    ripValue-=1;
-    if(mapAddressToBreakpoint.find(ripValue)!=mapAddressToBreakpoint.end()){
-        breakpoint* bp = mapAddressToBreakpoint[ripValue];
+    if(mapAddressToBreakpoint.find(ripValue) != mapAddressToBreakpoint.end()){
+        auto bp = mapAddressToBreakpoint[ripValue];
         bp->unsetBreakpoint();
-        writeRegisterValue("rip", ripValue);
         singleStep(debugeePid);
         waitForDebugeeToStop();
         bp->setBreakpoint();
     }
-
 }
 
 void debugger::continueExecution() {
@@ -317,7 +368,6 @@ int main(int argc, char* argv[]) {
         std::cout << "Started debugging process " << pid << '\n';
         debugger dbg{prog, pid};
         dbg.run();
-        exitDebugger(pid);
     }
 }
 

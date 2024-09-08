@@ -13,6 +13,10 @@ add_executable(hello examples/hello.cpp)
 set_target_properties(hello
                       PROPERTIES COMPILE_FLAGS "-g -O0")
 
+add_executable(segv examples/segv.cpp)
+set_target_properties(segv
+                     PROPERTIES COMPILE_FLAGS "-g -O0")
+
 add_executable(loop examples/loop.cpp)
 set_target_properties(loop
                      PROPERTIES COMPILE_FLAGS "-g -O0")

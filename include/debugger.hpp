@@ -33,8 +33,9 @@ namespace minigdb {
         siginfo_t get_signal_info();
         void handleSigTrap(siginfo_t sigInfo);
         void vmmap();
-
+        void getDebugeeExecutableLoadAddress();
         
+        unsigned long long exeLoadAddress{};
         std::string debugeeProgramName;
         pid_t debugeePid;
     };

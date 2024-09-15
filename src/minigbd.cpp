@@ -8,6 +8,9 @@
 #include <cstdint>
 #include <sys/user.h>
 #include <cstring>
+#include <inttypes.h>
+#include <fstream>
+#include <filesystem> 
 
 #include "linenoise.h"
 
@@ -238,6 +241,7 @@ void debugger::run() {
     what caused the state change of the debugee process through the wait status.
     */
         waitForDebugeeToStop();
+        getDebugeeExecutableLoadAddress();
         char* line = nullptr;
         bool shouldContinue = true;
         while(shouldContinue && (line = linenoise("minigbd> ")) ) {
@@ -321,6 +325,53 @@ void debugger::continueExecution() {
     handleIfCurrentlyAtBreakpoint();
     ptrace(PTRACE_CONT, debugeePid, nullptr, nullptr);
     waitForDebugeeToStop();
+}
+
+void debugger::getDebugeeExecutableLoadAddress() {
+    std::string mapsPath = "/proc/" + std::to_string(debugeePid) + "/maps";
+    std::ifstream mapsFile(mapsPath);
+    if (!mapsFile.is_open()) {
+        std::cerr << "Failed to open " << mapsPath << '\n';
+        return;
+    }
+
+    std::string line;
+    unsigned long long loadAddress = 0;
+
+    std::filesystem::path debugeePath(debugeeProgramName);
+    std::string debugeeFilename = debugeePath.filename().string();
+
+    while (std::getline(mapsFile, line)) {
+        std::istringstream iss(line);
+        std::string addressRange, permissions, offset, dev, inode, pathname;
+
+        // Read fields from the line
+        iss >> addressRange >> permissions >> offset >> dev >> inode;
+        std::getline(iss, pathname); 
+
+        if (!pathname.empty()) {
+            std::filesystem::path p(pathname);
+            std::string filename = p.filename().string();
+            if (filename == debugeeFilename) {
+                size_t dashPos = addressRange.find('-');
+                if (dashPos != std::string::npos) {
+                    std::string startAddressStr = addressRange.substr(0, dashPos);
+                    std::stringstream ss;
+                    ss << std::hex << startAddressStr;
+                    ss >> loadAddress;
+                    break;
+                }
+            }
+        }
+    }
+
+    mapsFile.close();
+
+    if (loadAddress != 0) {
+        exeLoadAddress = loadAddress;
+    } else {
+        std::cerr << "Failed to find the load address for the executable " << debugeeProgramName << '\n';
+    }
 }
 
 

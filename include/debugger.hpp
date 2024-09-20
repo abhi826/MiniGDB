@@ -6,19 +6,28 @@
 #include <linux/types.h>
 #include <memory>
 #include <unordered_map>
+#include <fcntl.h>  
+#include <unistd.h>  
 
 #include "breakpoint.hpp"
+
+#include "elf/elf++.hh"
+#include "dwarf/dwarf++.hh"
 
 namespace minigdb {
     class debugger {
     public:
         debugger (std::string progName, pid_t pid)
-            : debugeeProgramName{std::move(progName)}, debugeePid{pid} {}
+            : debugeeProgramName{std::move(progName)}, debugeePid{pid}
+            {
+               auto fd = open(debugeeProgramName.c_str(), O_RDONLY);
+               ef = elf::elf{elf::create_mmap_loader(fd)}; 
+               dw = dwarf::dwarf{dwarf::elf::create_loader(ef)};
+            }
 
         void run();
 
     private:
-        std::unordered_map<uintptr_t, std::shared_ptr<breakpoint>> mapAddressToBreakpoint;
         bool handleCommand(const std::string& line);
         void continueExecution();
         void waitForDebugeeToStop();      
@@ -34,10 +43,16 @@ namespace minigdb {
         void handleSigTrap(siginfo_t sigInfo);
         void vmmap();
         void getDebugeeExecutableLoadAddress();
+        void displaySourceCode(uintptr_t ripValue);
+        auto getIteratorToCurrentLineTableEntry(uintptr_t ripValue);
         
         unsigned long long exeLoadAddress{};
         std::string debugeeProgramName;
         pid_t debugeePid;
+        elf::elf ef{};
+        dwarf::dwarf dw{};
+        std::unordered_map<uintptr_t, std::shared_ptr<breakpoint>> mapAddressToBreakpoint;
+        std::vector<std::string> linesInDebugeeSourceFile{};
     };
 }
 

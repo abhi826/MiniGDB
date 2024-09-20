@@ -11,6 +11,8 @@
 #include <inttypes.h>
 #include <fstream>
 #include <filesystem> 
+#include <algorithm>
+#include <deque>
 
 #include "linenoise.h"
 
@@ -154,6 +156,63 @@ void debugger::addBreakpoint(uintptr_t bpAddr){
     bp->setBreakpoint();
 }
 
+// Function to display the window around the current line using a streaming approach
+void displaySourceWindowFromFile(const std::string& filePath, int currentLine, int context = 5) {
+    std::ifstream file(filePath);
+    if (!file.is_open()) {
+        std::cerr << "Failed to open file: " << filePath << std::endl;
+        return;
+    }
+
+    std::string line;
+    int lineNumber = 0;
+
+    std::deque<std::string> lineWindow;
+
+    while (std::getline(file, line)) {
+        lineNumber++;
+
+        if (lineNumber >= currentLine - context && lineNumber <= currentLine + context) {
+            lineWindow.push_back(line);
+        }
+
+        if (lineNumber > currentLine + context) {
+            break;
+        }
+    }
+
+    // Display the window
+    int startLine = std::max(1, currentLine - context);
+    int endLine = std::min(lineNumber, currentLine + context); // Ensure end is within bounds
+
+    for (int i = startLine; i <= endLine; ++i) {
+        if (i == currentLine) {
+            std::cout << "-> " << i << ": " << lineWindow[i - startLine] << std::endl;  // Highlight current line
+        } else {
+            std::cout << "   " << i << ": " << lineWindow[i - startLine] << std::endl;
+        }
+    }
+}
+
+auto debugger::getIteratorToCurrentLineTableEntry(uintptr_t ripValue){
+    unsigned long long pc = ripValue - exeLoadAddress;
+    int lineNumber = -1;
+    for (auto &cu : dw.compilation_units()) {
+            if (die_pc_range(cu.root()).contains(pc)) {
+                    // Map PC to a line
+                    auto &lt = cu.get_line_table();
+                    auto it = lt.find_address(pc);
+                    return it;
+            }
+    }
+    return dw.compilation_units()[0].get_line_table().begin();
+}
+
+void debugger::displaySourceCode(uintptr_t ripValue){
+    auto currLineItr = getIteratorToCurrentLineTableEntry(ripValue);
+    displaySourceWindowFromFile(currLineItr->file->path, currLineItr->line, 5);
+}
+
 siginfo_t debugger::get_signal_info(){
     siginfo_t info;
     memset(&info, 0, sizeof(info));
@@ -217,6 +276,7 @@ void debugger::handleSigTrap(siginfo_t sigInfo){
             ripValue-=1;
             writeRegisterValue("rip", ripValue);
             std::cout << "Hit breakpoint at address 0x" << std::hex << getRegisterValue("rip") << std::endl;
+            displaySourceCode(ripValue);
             break;
         }
         case TRAP_TRACE:

@@ -29,6 +29,17 @@ add_executable(unwinding examples/stack_unwinding.cpp)
 set_target_properties(unwinding
                       PROPERTIES COMPILE_FLAGS "-gdwarf-4 -O0")
 
+add_executable(function examples/function.cpp)
+set_target_properties(function
+                      PROPERTIES COMPILE_FLAGS "-gdwarf-4 -O0")
+
+add_executable(loopFunction examples/loopFunction.cpp)
+set_target_properties(loopFunction
+                     PROPERTIES COMPILE_FLAGS "-gdwarf-4 -O0")
+
+add_executable(stepOver examples/stepOverTest.cpp)
+set_target_properties(stepOver
+                     PROPERTIES COMPILE_FLAGS "-gdwarf-4 -O0")
 
 add_custom_target(
    libelfin

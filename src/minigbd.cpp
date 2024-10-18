@@ -13,6 +13,7 @@
 #include <filesystem> 
 #include <algorithm>
 #include <deque>
+#include <utility> 
 
 #include "linenoise.h"
 
@@ -23,6 +24,7 @@
 using namespace minigdb;
 
 void exitDebugger(pid_t pid);
+void displaySourceWindowFromFile(const std::string& filePath, int currentLine, int context, bool isNotEndOfLine);
 
 /*
 
@@ -59,6 +61,17 @@ void debugger::writeDataAtAddress(uintptr_t addr, long data){
     return writeData(debugeePid, addr, data);
 }
 
+void debugger::singleStepWithBreakpointCheck(){
+        uintptr_t ripValue = getRegisterValue("rip");
+        if(mapAddressToBreakpoint.find(ripValue) != mapAddressToBreakpoint.end()){
+            handleIfCurrentlyAtBreakpoint();
+        }
+        else{
+            singleStep(debugeePid);
+            waitForDebugeeToStop();
+        } 
+}
+
 void breakpoint::setBreakpoint(){
    originalDataAtBPAddr = readData(debugeePid, bpAddr);
    long newDataWithBPInstruction = ((originalDataAtBPAddr & ~0xFF) | 0xCC);
@@ -69,10 +82,6 @@ void breakpoint::unsetBreakpoint(){
     writeData(debugeePid, bpAddr, originalDataAtBPAddr);
 }
 
-void breakpoint::restoreBreakpoint(){
-
-
-}
 
 std::vector<std::string> split(const std::string &s, char delimiter) {
     std::vector<std::string> out{};
@@ -103,7 +112,32 @@ bool debugger::handleCommand(const std::string& line) {
         std::string addressStr(args[1]);
         std::uintptr_t address = std::stoull(addressStr, nullptr, 16);
         addBreakpoint(address);
+    }
+    else if(isPrefix(command, "step")){
+        // step forward into the very next line in the source file.
+        // steps into function calls.
+        stepToNextLine();
+    }
+    else if (isPrefix(command, "stepi")){
+        // steps forward 1 instruction in the disassembly.
+        singleStepWithBreakpointCheck();
+        uintptr_t ripValue = getRegisterValue("rip");
+        displaySourceCode(ripValue);
+    }
+    else if (isPrefix(command, "next"))
+    {
+        // Do not step into function calls. 
+        // Step forward to the next line in the source file that should be executed.
+        stepOver();
 
+    }
+    else if(isPrefix(command, "finish")) {
+        // Finish execution of the current function.
+        stepOut();
+    }
+    else if(isPrefix(command, "list")){
+        // List the Addresses of the current breakpoints that are set.
+        listBreakpoints();
     }
     else if(isPrefix(command, "memory")) {
         std::string addr {args[2], 2}; //assume 0xADDRESS
@@ -156,8 +190,222 @@ void debugger::addBreakpoint(uintptr_t bpAddr){
     bp->setBreakpoint();
 }
 
+void debugger::removeBreakpoint(uintptr_t bpAddr){
+    if(mapAddressToBreakpoint.count(bpAddr)){
+        auto bp = mapAddressToBreakpoint[bpAddr];
+        bp->unsetBreakpoint();
+        mapAddressToBreakpoint.erase(bpAddr);
+    }
+}
+
+auto debugger::getIteratorToCurrentLineTableEntry(uintptr_t ripValue){
+    unsigned long long pc = ripValue - exeLoadAddress;
+    int lineNumber = -1;
+    for (auto &cu : dw.compilation_units()) {
+            if (die_pc_range(cu.root()).contains(pc)) {
+                    // Map PC to a line
+                    auto &lt = cu.get_line_table();
+                    auto it = lt.find_address(pc);
+                    if(it == lt.end()){
+                        return std::make_pair(it,false);
+                    }
+                    return std::make_pair(it,true);
+            }
+    }
+    return std::make_pair(dw.compilation_units()[0].get_line_table().end(),false);
+}
+
+void debugger::stepOut(){
+    // step out of function
+    uintptr_t rbpValue = getRegisterValue("rbp");
+    uintptr_t addressOfFuncRetValInStack = rbpValue + 8;
+    uintptr_t returnAddress = readDataAtAddress(addressOfFuncRetValInStack);
+    bool shouldRemoveBreakpoint = false;
+    if(!mapAddressToBreakpoint.count(returnAddress)){
+        addBreakpoint(returnAddress);
+        shouldRemoveBreakpoint = true;
+    }
+    continueExecution();
+    if(shouldRemoveBreakpoint){
+        removeBreakpoint(returnAddress);
+    }
+}
+
+void debugger::stepOver(){
+    // Go to next line in the source file that should be executed.
+    // If currently at a function call, dont step into the function. 
+
+    // The simple solution to implement step over would be to put a breakpoint
+    // at the very next source line and continue. However, if we are in a loop or some conditional
+    // construct, the line that should be executed next may not necessarily be the very 
+    // next line in the source code.
+    // For example, look at the disassembly of 'function.cpp' in the examples folder.
+    // Suppose we are at the line 'if(n==5)', and attempt a step over. If the condition is false,
+    // it should go to the line "bar()" in the else statement and not the very next line
+    // in the source file.
+    // It seems like "real" debuggers implement an 
+    // instruction emulator to examine which instruction is currently being executed
+    // and work out all the possible branch targets, and place breakpoints on those targets. 
+    // That seems a bit too intensive to implement for this project currently (can be a future work item),
+    // so to emulate that behavior I will implement a simpler solution:
+    // Place a temporary breakpoint at every line in the current function.
+
+    // Figure out the current function we are in and get its DW_AT_low_pc and DW_AT_high_pc.
+    // DW_AT_high_pc is just an offset so its address would be DW_AT_low_pc + DW_AT_high_pc.
+    // You can get the iterator for the line table entry corresponding to DW_AT_low_pc.
+    // Keep iterating through the line table entries until the address of the entry is greater
+    // than DW_AT_high_pc. You can get the address of each line table entry as a field in the iterator
+    // line_table::entry->address.
+    uintptr_t ripValue = getRegisterValue("rip");
+    // pc is just the offset value.
+    uintptr_t pc = ripValue - exeLoadAddress;
+    // These addresses are just offsets. The load address of the debugee executable isn't added to them yet.
+    uintptr_t addrOfCurrFuncLow = 0;
+    uintptr_t addrOfCurrFuncHigh = 0;
+
+    for(auto& cu: dw.compilation_units()){
+        // root die = DW_TAG_compile_unit
+        const auto& rootDie = cu.root();
+        if (die_pc_range(rootDie).contains(pc))
+        {
+            // We found the right compilation unit that we are currently in.
+            //std::cout<<"Found the CU!"<<std::endl;
+            for(const auto& child : rootDie){
+                // FYI:
+                // When using a range-based for loop the compiler will translate it to:
+                // for (auto it = rootDie.begin(); it != rootDie.end(); ++it) {
+                //      const auto& child = *it;  
+                
+                // Each compilation unit can have multiple subprograms(functions), so get the one which contains
+                // the current instruction pointer value.
+                if ((child.has(dwarf::DW_AT::low_pc)) && (child.has(dwarf::DW_AT::high_pc)) &&
+                    // Need to check that the DIE has the attributes low_pc and high_pc first because
+                    // die_pc_range() calls at_low_pc(die) which calls die[low_pc] without checking if
+                    // low_pc is even an atribute of the die first. It seems that there are subprogram DIEs
+                    // that don't have those attributes. For those DIEs it can throw an exception and cause
+                    // a core dump.
+                    //                              Core Dump Backtrace
+                    /*
+                        gef➤  bt
+                        #0  __pthread_kill_implementation (no_tid=0x0, signo=0x6, threadid=<optimized out>) at ./nptl/pthread_kill.c:44
+                        ...
+                        #7  0x000076f5a42a5a55 in std::terminate() () from /lib/x86_64-linux-gnu/libstdc++.so.6
+                        #8  0x000076f5a42bb391 in __cxa_throw () from /lib/x86_64-linux-gnu/libstdc++.so.6
+                        #9  0x000076f5a462c17a in dwarf::die::operator[] (this=this@entry=0x7ffc2ec45530, attr=attr@entry=dwarf::DW_AT::low_pc) at /usr/include/c++/13/bits/allocator.h:184
+                        #10 0x000076f5a464381c in dwarf::at_low_pc (d=...) at attrs.cc:105
+                        #11 0x000076f5a4644cc8 in dwarf::die_pc_range (d=...) at attrs.cc:262
+                        #12 0x00005ba6e8ec427c in minigdb::debugger::stepOver (this=0x7ffc2ec458c0) at /home/hades/MiniGDB/src/minigbd.cpp:281
+                        #13 0x00005ba6e8ec2da3 in minigdb::debugger::handleCommand (this=0x7ffc2ec458c0, line="next") at /home/hades/MiniGDB/src/minigbd.cpp:131
+                        #14 0x00005ba6e8ec5d03 in minigdb::debugger::run (this=0x7ffc2ec458c0) at /home/hades/MiniGDB/src/minigbd.cpp:499
+                        #15 0x00005ba6e8ec71e3 in main (argc=0x2, argv=0x7ffc2ec45aa8) at /home/hades/MiniGDB/src/minigbd.cpp:675
+                        gef➤  frame 12
+                        #12 0x00005ba6e8ec427c in minigdb::debugger::stepOver (this=0x7ffc2ec458c0) at /home/hades/MiniGDB/src/minigbd.cpp:281
+                        281	                if ((child.has(dwarf::DW_AT::low_pc)) && (child.has(dwarf::DW_AT::high_pc)) &&
+                        gef➤  frame 11
+                        #11 0x000076f5a4644cc8 in dwarf::die_pc_range (d=...) at attrs.cc:262
+                        262	        taddr low = at_low_pc(d);
+                        gef➤  frame 10
+                        #10 0x000076f5a464381c in dwarf::at_low_pc (d=...) at attrs.cc:105
+                        105	AT_ADDRESS(low_pc);
+                        gef➤  frame 9
+                        #9  0x000076f5a462c17a in dwarf::die::operator[] (this=this@entry=0x7ffc2ec45530, attr=attr@entry=dwarf::DW_AT::low_pc) at /usr/include/c++/13/bits/allocator.h:184
+                        184	      ~allocator() _GLIBCXX_NOTHROW { }
+                    */
+
+                    (child.tag == dwarf::DW_TAG::subprogram) && (die_pc_range(child).contains(pc))){
+                    // We found the right function we are currently in.
+
+                    //std::cout<<"Found the right function"<<std::endl;
+                    //std::cout<<"low_pc form: "<<to_string(child[dwarf::DW_AT::low_pc].get_form())<<std::endl;
+                    //std::cout<<"low pc address: "<<(child[dwarf::DW_AT::low_pc].as_address())<<std::endl;
+                    //std::cout<<"high_pc form: "<<to_string(child[dwarf::DW_AT::high_pc].get_form())<<std::endl;
+                    //std::cout<<"high_pc value: "<<(child[dwarf::DW_AT::high_pc].as_uconstant())<<std::endl;
+
+                    // Looking at the .debug_abrev section, it seems like DW_AT_low_pc is of type DW_FORM_addr
+                    // while DW_AT_high_pc is of type DW_FORM_data8.
+                    addrOfCurrFuncLow = child[dwarf::DW_AT::low_pc].as_address();
+                    addrOfCurrFuncHigh = child[dwarf::DW_AT::high_pc].as_uconstant();
+                    addrOfCurrFuncHigh += addrOfCurrFuncLow;
+                    //std::cout<<"addrOfCurrFuncLow: " <<addrOfCurrFuncLow << " addrOfCurrFuncHigh: " <<addrOfCurrFuncHigh << std::endl;
+                    break;
+                }
+            }
+            auto currLineItr = getIteratorToCurrentLineTableEntry(ripValue);
+            const auto& lineTable = cu.get_line_table();
+            auto itr = lineTable.find_address(addrOfCurrFuncLow);
+            // itr->address only gives an offset.
+            // tempBreakpoints should hold breakpoint address (itr->address + exeLoadAddress)
+            std::vector<uintptr_t> tempBreakpoints;
+            while((itr != lineTable.end()) && (itr->address <= addrOfCurrFuncHigh)){
+                // Don't add a breakpoint at the current line we are in.
+                //
+                // Sometimes one line can be associated with more than 1 address.
+                // For example:
+                /*
+                    for (int i = 1; i <= 5; ++i) {
+                    11e2:	c7 45 fc 01 00 00 00 	mov    DWORD PTR [rbp-0x4],0x1
+                    11e9:	eb 0e                	jmp    11f9 <main+0x23>
+                                                                   line            address
+                /home/hades/MiniGDB/examples/loopFunction.cpp       9              0x11e2
+                /home/hades/MiniGDB/examples/loopFunction.cpp       9              0x11e9
+                */
+                // To accomodate for this, don't add breakpoints at addresses which correspond
+                // to the same line as the current line we are in. Otherwise, when we stepOver we 
+                // will still be in the same line. 
+                if(itr==currLineItr.first || itr->line == currLineItr.first->line){
+                    //std::cout<<"Skipping adding breakpoint at current line # " << currLineItr.first->line << " at address " <<currLineItr.first->address+exeLoadAddress <<std::endl;
+                    itr++;
+                    continue;
+                }
+                if(!mapAddressToBreakpoint.count(itr->address+exeLoadAddress)){
+                    tempBreakpoints.push_back(itr->address + exeLoadAddress);
+                    //std::cout<<"Adding breakpoint at " << (itr->address+exeLoadAddress) << " for line # " << itr->line << std::endl;
+                    addBreakpoint(itr->address + exeLoadAddress);
+                }
+                itr++;
+            }
+            // Set a breakpoint at the return address of the function as well in case execution returns back to the caller.
+            uintptr_t rbpValue = getRegisterValue("rbp");
+            uintptr_t addressOfFuncRetValInStack = rbpValue + 8;
+            uintptr_t returnAddress = readDataAtAddress(addressOfFuncRetValInStack);
+            if(!mapAddressToBreakpoint.count(returnAddress)){
+                //std::cout << "Adding breakpoint at return address " << returnAddress << std::endl;
+                tempBreakpoints.push_back(returnAddress);
+                addBreakpoint(returnAddress);
+            }
+            continueExecution();
+            for(const auto addr:tempBreakpoints){
+                //std::cout << "Removing breakpoint at address "<<addr<<std::endl;
+                removeBreakpoint(addr);
+            }
+            break;
+        }
+    }
+}
+
+void debugger::stepToNextLine(){
+    // get current line in file and keep doing a single step instruction until the
+    // line changes.
+    uintptr_t ripValue = getRegisterValue("rip");
+    auto currLineItrAndValidLinePair = getIteratorToCurrentLineTableEntry(ripValue);
+    auto lineItr = currLineItrAndValidLinePair.first;
+    while(true){
+        singleStepWithBreakpointCheck();
+        uintptr_t ripValue = getRegisterValue("rip");
+        currLineItrAndValidLinePair = getIteratorToCurrentLineTableEntry(ripValue);
+        if(!currLineItrAndValidLinePair.second || currLineItrAndValidLinePair.first->line != lineItr->line){
+            break;
+        }
+    }
+    displaySourceWindowFromFile(currLineItrAndValidLinePair.first->file->path, currLineItrAndValidLinePair.first->line,5,currLineItrAndValidLinePair.second);
+}
+
 // Function to display the window around the current line using a streaming approach
-void displaySourceWindowFromFile(const std::string& filePath, int currentLine, int context = 5) {
+void displaySourceWindowFromFile(const std::string& filePath, int currentLine, int context = 5, bool isNotEndOfLine=true) {
+    if(!isNotEndOfLine){
+        std::cout << "Mapping to source file line not available" << std::endl;
+        return;
+    }
     std::ifstream file(filePath);
     if (!file.is_open()) {
         std::cerr << "Failed to open file: " << filePath << std::endl;
@@ -194,23 +442,9 @@ void displaySourceWindowFromFile(const std::string& filePath, int currentLine, i
     }
 }
 
-auto debugger::getIteratorToCurrentLineTableEntry(uintptr_t ripValue){
-    unsigned long long pc = ripValue - exeLoadAddress;
-    int lineNumber = -1;
-    for (auto &cu : dw.compilation_units()) {
-            if (die_pc_range(cu.root()).contains(pc)) {
-                    // Map PC to a line
-                    auto &lt = cu.get_line_table();
-                    auto it = lt.find_address(pc);
-                    return it;
-            }
-    }
-    return dw.compilation_units()[0].get_line_table().begin();
-}
-
 void debugger::displaySourceCode(uintptr_t ripValue){
-    auto currLineItr = getIteratorToCurrentLineTableEntry(ripValue);
-    displaySourceWindowFromFile(currLineItr->file->path, currLineItr->line, 5);
+    auto currLineItrAndValidLinePair = getIteratorToCurrentLineTableEntry(ripValue);
+    displaySourceWindowFromFile(currLineItrAndValidLinePair.first->file->path, currLineItrAndValidLinePair.first->line, 5, currLineItrAndValidLinePair.second);
 }
 
 siginfo_t debugger::get_signal_info(){
@@ -368,6 +602,14 @@ void debugger::vmmap(){
     std::string printMemoryMappingCmd = "cat /proc/"+pidStr+"/maps";
     system(printMemoryMappingCmd.c_str());
 
+}
+
+void debugger::listBreakpoints(){
+    int count  = 1;
+    for(const auto& [addr,_] : mapAddressToBreakpoint){
+        std::cout<<count<<") 0x"<<addr<<std::endl;
+        count++;
+    }
 }
 
 void debugger::handleIfCurrentlyAtBreakpoint(){

@@ -32,6 +32,7 @@ namespace minigdb {
         void continueExecution();
         void waitForDebugeeToStop();      
         void addBreakpoint(uintptr_t bpAddr);  
+        void removeBreakpoint(uintptr_t bpAddr);
         void handleIfCurrentlyAtBreakpoint();
         unsigned long long getRegisterValue(std::string reg);
         void writeRegisterValue(std::string reg, unsigned long long val);
@@ -45,6 +46,12 @@ namespace minigdb {
         void getDebugeeExecutableLoadAddress();
         void displaySourceCode(uintptr_t ripValue);
         auto getIteratorToCurrentLineTableEntry(uintptr_t ripValue);
+        void stepOut();
+        void stepOver();
+        void singleStepWithBreakpointCheck();
+        void stepToNextLine();
+        void listBreakpoints();
+        
         
         unsigned long long exeLoadAddress{};
         std::string debugeeProgramName;

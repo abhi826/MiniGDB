@@ -108,10 +108,21 @@ bool debugger::handleCommand(const std::string& line) {
         continueExecution();
     }
     else if(isPrefix(command, "breakpoint") && (args.size()>1)){
-
-        std::string addressStr(args[1]);
-        std::uintptr_t address = std::stoull(addressStr, nullptr, 16);
-        addBreakpoint(address);
+        // 0x<hexadecimal> -> address breakpoint
+        // <filename>:<line> -> line number breakpoint
+        // <anything else> -> function name breakpoint
+        if(args[1][0] == '0' && args[1][1] =='x'){
+            std::string addressStr(args[1]);
+            std::uintptr_t address = std::stoull(addressStr, nullptr, 16);
+            addBreakpoint(address);
+        }
+        else if(args[1].find(':') != std::string::npos){
+            auto fileAndLine = split(args[1], ':');
+            setBreakpointAtSourceLine(fileAndLine[0], stoull(fileAndLine[1]));
+        }
+        else{
+            setBreakpointAtFunction(args[1]);
+        }
     }
     else if(isPrefix(command, "step")){
         // step forward into the very next line in the source file.
@@ -377,6 +388,52 @@ void debugger::stepOver(){
             for(const auto addr:tempBreakpoints){
                 //std::cout << "Removing breakpoint at address "<<addr<<std::endl;
                 removeBreakpoint(addr);
+            }
+            break;
+        }
+    }
+}
+
+void debugger::setBreakpointAtFunction(std::string function)
+{
+    for(auto& cu: dw.compilation_units()){
+        for(const auto& child:cu.root()){
+            if((child.tag == dwarf::DW_TAG::subprogram) && (child.has(dwarf::DW_AT::name)) && 
+               (child[dwarf::DW_AT::name].as_string()==function) && (child.has(dwarf::DW_AT::low_pc)))
+            {
+                // Found the right DIE
+                uintptr_t addrOfFunction = child[dwarf::DW_AT::low_pc].as_address();
+                // If we set a breakpoint at addrOfFunction, it would be at the function prologue,
+                // but we want it on the first line of source code in the function. Get an iterator
+                // to the entry in the lineTable for addrOfFunction and increment it by 1 to get 
+                // the first actual line of code in the function. If for some reason the function
+                // is empty, don't use the incremented iterator's address.
+                const auto& lineTable = cu.get_line_table();
+                auto itr = lineTable.find_address(addrOfFunction);
+                itr++;
+                if(itr != lineTable.end()){
+                    addrOfFunction = itr->address;
+                }
+                addBreakpoint(addrOfFunction+exeLoadAddress);
+                return;
+            }
+        }
+    }
+}
+
+void debugger::setBreakpointAtSourceLine(std::string file, unsigned long long lineNum)
+{
+    for(auto& cu: dw.compilation_units()){
+        auto& root = cu.root();
+        if (root.has(dwarf::DW_AT::name) && root[dwarf::DW_AT::name].as_string().find(file) != std::string::npos){
+            // Found the right compilation unit 
+            const auto& lineTable  = cu.get_line_table();
+            for (auto itr = lineTable.begin(); itr!=lineTable.end(); itr++){
+                if(itr->line == lineNum){
+                    // Found the right line number. Add the breakpoint at its address.
+                    addBreakpoint(itr->address+exeLoadAddress);
+                    break;
+                }
             }
             break;
         }

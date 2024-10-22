@@ -51,6 +51,8 @@ namespace minigdb {
         void singleStepWithBreakpointCheck();
         void stepToNextLine();
         void listBreakpoints();
+        void setBreakpointAtSourceLine(std::string file, unsigned long long lineNum);
+        void setBreakpointAtFunction(std::string function);
         
         
         unsigned long long exeLoadAddress{};

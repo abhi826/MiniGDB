@@ -175,6 +175,9 @@ bool debugger::handleCommand(const std::string& line) {
     else if(isPrefix(command, "vmmap")){
         vmmap();
     }
+    else if(isPrefix(command, "backtrace")){
+        printBacktrace();
+    }
     else if(isPrefix(command, "quit")){
         return false;
     }
@@ -224,6 +227,21 @@ auto debugger::getIteratorToCurrentLineTableEntry(uintptr_t ripValue){
             }
     }
     return std::make_pair(dw.compilation_units()[0].get_line_table().end(),false);
+}
+
+auto debugger::getFunctionDieFromPC(uintptr_t pc){
+    for(const auto& cu: dw.compilation_units()){
+        if(die_pc_range(cu.root()).contains(pc)){
+            for(const auto& child: cu.root()){
+                if((child.has(dwarf::DW_AT::low_pc)) && (child.has(dwarf::DW_AT::high_pc)) 
+                 && (child.tag == dwarf::DW_TAG::subprogram) && (die_pc_range(child).contains(pc))){
+                    //Check the implementation of stepOver() for more info on the above conditionals.
+                    return child;
+                }
+            }
+        }
+    }
+    throw std::out_of_range{"Cannot find function"};
 }
 
 void debugger::stepOut(){
@@ -437,6 +455,58 @@ void debugger::setBreakpointAtSourceLine(std::string file, unsigned long long li
             }
             break;
         }
+    }
+}
+
+void debugger::printBacktrace(){
+    /*
+            Model of Stack Layout
+
+                    High
+                |   ...   |
+                +---------+
+            +24 |  Arg 1  |
+                +---------+
+            +16 |  Arg 2  |
+                +---------+
+            + 8 | Return  |
+                +---------+
+                |Saved RBP|
+        RBP+--> +---------+
+            - 8 |  Var 1  |
+                +---------+
+                |  Var 2  |
+        RSP+--> +---------+
+                |   ...   |
+                    Low
+    
+    */
+    auto outputFrame = [exeLoadAddress = this->exeLoadAddress, frame_number = 0] (auto&& func) mutable {
+        std::cout << "frame #" << frame_number++ << ": 0x" << dwarf::at_low_pc(func) + exeLoadAddress
+                  << " in " << dwarf::at_name(func) << "()"<< std::endl;
+    };
+    // A function prologue typically consists of the following instructions:
+    // push   rbp
+    // mov    rbp,rsp
+    //
+    // The 'push rbp' saves the stack frame from the previous function.
+    // The value from register rbp provides the current function's stack frame starting address
+    // after the previous function's rbp is pushed onto the stack. 
+    // If you derference the 8 bytes from the address in rbp you will get the address of the
+    // previous function's stack frame starting address.
+    // rbp + 8 will hold the address of the return address.
+    uintptr_t rbpValue = getRegisterValue("rbp");
+    uintptr_t addressOfFuncRetValInStack = rbpValue + 8;
+    uintptr_t returnAddress = readDataAtAddress(addressOfFuncRetValInStack);
+    auto currFuncDie = getFunctionDieFromPC(getRegisterValue("rip")- exeLoadAddress);
+    outputFrame(currFuncDie);
+    // From the current stack frame, print its callers output frame.
+    while(dwarf::at_name(currFuncDie) != "main"){
+        currFuncDie = getFunctionDieFromPC(returnAddress-exeLoadAddress);
+        outputFrame(currFuncDie);
+        rbpValue = readDataAtAddress(rbpValue);
+        addressOfFuncRetValInStack = rbpValue +8;
+        returnAddress = readDataAtAddress(addressOfFuncRetValInStack);
     }
 }
 

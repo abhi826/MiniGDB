@@ -53,6 +53,8 @@ namespace minigdb {
         void listBreakpoints();
         void setBreakpointAtSourceLine(std::string file, unsigned long long lineNum);
         void setBreakpointAtFunction(std::string function);
+        auto getFunctionDieFromPC(uintptr_t pc);
+        void printBacktrace();
         
         
         unsigned long long exeLoadAddress{};
